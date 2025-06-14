@@ -47,21 +47,19 @@ git clone https://github.com/CChahrour/RNAseq_demo.git
 cd RNAseq_demo
 ```
 
-2. Open `RNAseq_LRT.qmd` in RStudio or VS Code.
+2. Open `LRT_timepoint_example.Rmd` in RStudio or VS Code.
 
 3. Adjust the `setwd()` path at the top to match your working environment.
 
-4. Render the Quarto report to HTML:
+4. Adjust the sample_info to match the experimental design
 
-```r
-quarto::quarto_render("RNAseq_LRT.qmd")
-```
+5. Render the report to HTML
 
 ---
 
 ## 🧪 Analysis Overview
 
-- **Design**: LRT comparing full vs reduced models (e.g., with and without `genotype`, or `time:treat` interaction)
+- **Design**: LRT comparing full vs reduced models
 - **Transformations**: VST, RLE, PCA
 - **Visualizations**: Boxplots, heatmaps, volcano plots, Venn diagrams
 - **Interpretation**: P-value distributions, fold change summaries, DE gene overlaps
@@ -76,15 +74,3 @@ Once rendered, the HTML report contains:
 - Quality control plots (RLE, PCA)
 - Differential expression statistics and visualizations
 - Overlapping DE genes across time points or conditions
-
----
-
-## 📬 Contact
-
-Questions or feedback? Feel free to reach out via GitHub or [LinkedIn](https://www.linkedin.com/in/catherinechahrour/).
-
----
-
-## 🧭 License
-
-This project is shared under the MIT License — feel free to reuse, cite, and adapt.
