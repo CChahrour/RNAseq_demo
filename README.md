@@ -1,4 +1,4 @@
-# RNAseq_demo
+# RNAseq demo
 
 This repository contains a fully worked example of an RNA-seq differential expression analysis in R, including:
 
