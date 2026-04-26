@@ -70,6 +70,7 @@ sample_info <- data.frame(sample = colnames(df)) %>%
   filter(startsWith(sample, "seqnado_output")) %>% 
   mutate(sample = gsub("(.+aligned/)(.+)(.bam)", "\\2", sample)) %>% 
   separate(col = sample, into = c("cell", "genotype", "replicate"), remove = F) %>% 
+  filter(genotype != "hom") %>% # Here we only wnt the wt and het samples
   mutate(across(where(is.character), as.factor)) %>%
   mutate(across(where(is.numeric), as.factor)) 
 
@@ -80,7 +81,7 @@ kable(sample_info, row.names = F, "simple")
 
 ```{r}
 # Define consistent color palettes for time and treatment variables
-gene_col <- brewer.pal(9, "Reds")[c(5,7,9)] %>% 
+gene_col <- brewer.pal(9, "Reds")[c(5,9)] %>% 
   setNames(levels(sample_info$genotype))
 
 
@@ -125,8 +126,8 @@ dds <- DESeqDataSetFromMatrix(
   design = ~ genotype
 )
 
-# Fit model using likelihood ratio test (LRT), removing intersect in reduced model
-dds <- DESeq(dds, test="LRT", reduced = ~ 1)
+# Fit model using Wald test
+dds <- DESeq(dds, test = "Wald")
 ```
 
 Normalisation was performed in DESeq2 and data vst transformed to allow for visualisation.
@@ -236,7 +237,7 @@ metadata_for_cor <- colData(dds) %>%
 # Correlation between metadata and first 8 PCs using Spearman method
 pca_meta_corr <- abs(cor(
   metadata_for_cor, 
-  pca_data[, paste0("PC", 1:8)], 
+  pca_data[, paste0("PC", 1:6)], 
   method = "spearman"))
 
 # Plot correlation heatmap
@@ -260,133 +261,206 @@ draw(heatmap, heatmap_legend_side = "bottom", annotation_legend_side = "right")
 ```
 
 
-# Pairwise comparisons {.tabset}
+# DE results
 
 ```{r}
-colors <- brewer.pal(5, "RdBu")[c(5,1)] %>% 
-  append("grey") %>% 
-  set_names(c("Down", "Up", "NotSig"))
+normCounts <- counts(dds, normalized = T) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene")
 
-DE_summary_fn <- function(df, fcs, pvals) {
+mean_normCounts <- normCounts %>%
+  as.data.frame() %>%
+  gather(sample, value, -gene) %>% 
+  left_join(sample_info, by = c(sample = "sample")) %>% 
+  group_by(gene, cell) %>% 
+  summarise(mean_value = mean(value), .groups = "rowwise") %>%
+  spread(key = cell, value = mean_value, sep = "_mean_")
+
+results <- results(dds) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  inner_join(mean_normCounts, by = "gene") %>%
+  filter(!is.na(padj)) %>%
+  filter(!is.na(pvalue)) %>%
+  arrange(padj)
+```
+
+## Histogram of p-values {.tabset}
+
+```{r}
+
+p_val <- ggplot(results, aes(pvalue)) +
+  geom_histogram(binwidth = 0.01, fill="lightblue") +
+  scale_x_continuous(expand = c(0, 0), ) +
+  scale_y_continuous(expand = c(0, 0), ) +
+  ggtitle(paste0("Distribution of p-values")) +
+  theme_minimal()
+
+print(p_val)
+
+
+# ggsave(
+#   paste0(fig_dir, "/p_val_distribution.pdf"),
+#   plot = p_val, device = cairo_pdf, dpi = 1200, width = 6, height = 6)
+```
+
+## Number of Diff_genes genes
+
+```{r}
+summary_fn <- function(df, pvals, fc_thresholds) {
   summary_df <- data.frame()
-  for (fc in fcs) {
-    for (pval in pvals) {
-      up_count = sum(df$padj < pval & df$log2FoldChange >  fc)
-      down_count = sum(df$padj < pval & df$log2FoldChange < -fc)
-
-      summary_df[1, paste0('log2FC>', fc, '_', pval)] <- up_count
-      summary_df[1, paste0('log2FC<', fc, '_', pval)] <- down_count
+  
+  for (pval in pvals) {
+    for (i in seq_along(fc_thresholds)) {
+      if (i == length(fc_thresholds)) {
+        count_pos <- sum(df$padj < pval & df$log2FoldChange >= fc_thresholds[i], na.rm = TRUE)
+        count_neg <- sum(df$padj < pval & df$log2FoldChange <= -fc_thresholds[i], na.rm = TRUE)
+      } else {
+        count_pos <- sum(df$padj < pval & df$log2FoldChange >= fc_thresholds[i] & df$log2FoldChange < fc_thresholds[i + 1], na.rm = TRUE)
+        count_neg <- sum(df$padj < pval & df$log2FoldChange <= -fc_thresholds[i] & df$log2FoldChange > -fc_thresholds[i + 1], na.rm = TRUE)
+      }
+      summary_df[1, paste0('fc_', fc_thresholds[i], '_pos_', pval)] <- count_pos
+      summary_df[1, paste0('fc_', fc_thresholds[i], '_neg_', pval)] <- -count_neg  
     }
   }
-
+  
   summary_df %>%
-    pivot_longer(cols = starts_with("log"), values_to = "count") %>%
-    separate(col = name, into = c("log2FoldChange", "pvalue"), sep = "_") %>%
-    mutate(
-      FC_direction = ifelse(str_detect(log2FoldChange, ">"), "up", "down"), 
-      FoldChange_threshold = str_extract(log2FoldChange, "(?<=<|>)(\\d+)"), 
-      count = ifelse(str_detect(log2FoldChange, ">"), count, -count)
-    )
+    pivot_longer(cols = starts_with("fc_"), values_to = "count") %>%
+    separate(col = name, into = c("fc", "fc_value", "direction", "pvalue"), sep = "_") %>%
+    mutate(fc_value = paste0("fc_", fc_value),
+           fc_value = factor(fc_value, levels = rev(unique(fc_value))),
+           pvalue = factor(pvalue, levels = unique(pvalue)))
 }
 
-fold_changes <- c(0:3)
+# Define p-values and FC thresholds
 pvalues <- c(0.05, 0.01, 0.001)
+fc_thresholds <- c(0:3)
+
+# run our little function
+diff_summary <- summary_fn(results, pvalues, fc_thresholds)
+
+# Just making the colours more contrasty
+fc_col <- brewer.pal(n = length(fc_thresholds) + 2, "Purples")[-c(1:2)] %>% 
+  set_names(paste0("fc_", fc_thresholds))
 res_names <- resultsNames(dds)[-1]
-
-DE_results_pairwise <- list()
-
-for(comp in res_names) {
-  cat("## ", comp, "\n \n")
-  
-  res <- results(dds, name = comp, test="Wald") %>% 
-   as.data.frame() %>%
-    rownames_to_column("gene") %>% 
-    arrange(padj) %>% 
-    filter(!is.na(padj))
-  
-  pval <- ggplot(res, aes(pvalue)) +
-    geom_histogram(fill = "lightblue", binwidth = 0.01) +
-    theme_light() +
-    theme(text = element_text(size = 15)) +
-    ggtitle(paste("P-value distribution: ", comp)) 
-  print(pval)
-  
-  res_filtered <- res %>% 
-    filter(padj < 0.05)
-  
-  res_list <- list(res_filtered)
-  names(res_list) <- comp
-  DE_results_pairwise <- append(DE_results_pairwise, res_list)
-  DEsummary <- DE_summary_fn(res, fold_changes, pvalues)
-
-  p <- ggplot(DEsummary, aes(x=pvalue, y=count, 
-                        fill=FoldChange_threshold,
-                        group=FoldChange_threshold)) +
-    geom_bar(stat="identity", position=position_dodge()) +
-    geom_hline(yintercept=0, color = "grey") +
-    ggtitle(paste("DE genes:", comp)) +
-    scale_fill_brewer(palette = "Dark2") +
-    theme_light() +
-    theme(text = element_text(size = 15))
-  print(p)
-
-  res4plot <- res %>%
-    dplyr::select(gene, log2FoldChange, padj) %>%
-    arrange(padj) %>%
-    mutate(
-      DE = case_when(
-        padj < 0.05 & log2FoldChange < 0 ~ "Down",
-        padj < 0.05 & log2FoldChange >= 0 ~ "Up",
-        TRUE ~ "NotSig"
-      ),
-      label = if_else(gene %in% union(
-        head(filter(., DE == "Up")$gene, 5),
-        head(filter(., DE == "Down")$gene, 5)
-      ), gene, as.character(NA))
-    )
-
-  maxLFC <- max(abs(res4plot$log2FoldChange))
-  maxpadj <- max(-log10(res4plot$padj), na.rm = TRUE)
-  
-  
-  g <- ggplot(data=res4plot, aes(x=log2FoldChange, y=-log10(padj), col=DE, label=label)) +
-    geom_point(size=1) +
-    theme_minimal() +
-    geom_label_repel(aes(label = label), show.legend = F, max.overlaps = 20) +
-    scale_colour_manual(values = colors) +
-    geom_vline(xintercept=0, linetype='dotted', col="black") +
-    geom_hline(yintercept=-log10(0.05), linetype='dotted', col="black") +
-    xlab("log2 fold change") +
-    ylab("-log10 adjusted p-value") +
-    xlim(-maxLFC, maxLFC) +
-    ylim(0, maxpadj) +
-    ggtitle(comp) +
-    theme(text = element_text(size = 15))
-  # outname <- paste0("plots/volcano_", comp,".pdf")
-  # ggsave( outname, g, width = 8, height = 6)
-  print(g)
-  
-  cat(" \n \n")
-}
+# Plot the summary
+ggplot(diff_summary, aes(x = pvalue, y = count, fill = fc_value)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_hline(yintercept = 0, color = "darkgrey") +
+  ggtitle(paste("Diff_genes -", res_names)) +
+  scale_fill_manual(values = fc_col) +
+  theme_bw() +
+  labs(x = "P-value Threshold", y = "Count")
 ```
 
-# Overlapping genes in comparisons
+# Volcano
 
 ```{r}
-library(venn)
-venn::venn(
-  x = list(
-    "RUNX2 hom" = DE_results_pairwise$genotype_hom_vs_wt$gene,
-    "RUNX2 het" = DE_results_pairwise$genotype_het_vs_wt$gene
-  ),
-  zcolor = gene_col[c("het", "hom")],
-  opacity = 0.5,
-  ilcs = 1,
-  ilabels = "counts",
-  box = F,
-)
+colors <- brewer.pal(5, "RdBu")[c(5,1)] %>%
+  append("grey") %>%
+  set_names(c("Down", "Up", "NotSig"))
+
+
+res4plot <- results %>%
+  dplyr::select(log2FoldChange, padj, gene) %>%
+  mutate(padj = padj +1e-300) %>% 
+  arrange(padj) %>%
+  mutate(
+    DE = case_when(
+      padj < 0.05 & log2FoldChange < 0 ~ "Down",
+      padj < 0.05 & log2FoldChange > 0 ~ "Up",
+      TRUE ~ "NotSig"
+    ),
+    label = if_else(gene %in% union(
+      head(filter(., DE == "Up")$gene, 5),
+      head(filter(., DE == "Down")$gene, 5)
+    ), gene, as.character(NA))
+  ) 
+maxLFC <- max(abs(res4plot$log2FoldChange))
+maxpadj <- max(-log10(res4plot$padj), na.rm = TRUE)
+maxpadj <- max(maxpadj, -log10(0.05))
+
+g <- ggplot(
+  data=res4plot,
+  aes(
+    x=log2FoldChange,
+    y=-log10(padj),
+    col=DE,
+    label=label)) +
+  geom_point(size = 1, alpha = 0.5) +
+  theme_minimal() +
+  geom_label_repel(aes(label = label), show.legend = T) +
+  scale_colour_manual(values = colors) +
+  geom_vline(xintercept=0, linetype='dotted', col="black") +
+  geom_hline(yintercept=-log10(0.05), linetype='dotted', col="black") +
+  xlab("log2 fold change") +
+  ylab("-log10 adjusted p-value") +
+  theme(axis.title.x = element_text(colour="black", size=14),
+        axis.title.y = element_text(colour="black", size=14))+
+  xlim(-maxLFC, maxLFC) +
+  ylim(0, maxpadj) +
+  ggtitle(res_names)
+
+# ggsave(
+#   filename = paste0(de_dir, "/volcano_", res_names, ".pdf"),
+#   plot = g,
+#   dpi = 900,
+#   create.dir = T)
+
+print(g)
 ```
 
+# Heatmap
+
+padj < 0.05
+
+```{r}
+results_sig <- results %>%
+  filter(padj < 0.05) %>%
+  arrange(padj) %>%
+  head(5000)
+
+matrix <- normCounts %>%
+  as.data.frame() %>%
+  filter(gene %in% results_sig$gene) %>%
+  column_to_rownames("gene") %>%
+  as.matrix() %>%
+  t() %>%
+  scale() %>%
+  t()
+
+groups <- as.character(sample_info$genotype)
+col_fun <- colorRamp2(seq(1.5, -1.5, length = 11), brewer.pal(n = 11, name = "RdBu"))
+
+set.seed(123)
+DEheatmap <- Heatmap(
+  matrix,
+  top_annotation = col_ha,
+  cluster_rows = T,
+  show_row_names = F,
+  row_title = "genes",
+  show_row_dend = T,
+  show_column_names = FALSE,
+  cluster_columns = T,
+  column_split = groups,
+  col = col_fun,
+  use_raster = T,
+  row_title_gp = gpar(fontsize = 16),
+  column_title_gp = gpar(fontsize = 16, fontface = "bold"),
+  heatmap_legend_param = list(
+    title = "Row z-score",
+    title_gp = gpar(fontsize = 16),
+    labels_gp = gpar(fontsize = 16),
+    title_position = "topcenter",
+    direction = "horizontal"))
+
+ht = draw(DEheatmap, heatmap_legend_side = "bottom", annotation_legend_side = "right")
+
+# pdf(file=paste0(fig_dir, "/heatmap.pdf"), width=8, height=6, pointsize = 16)
+# draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "bottom")
+# dev.off()
+
+```
 
 # Session Info
 
