@@ -11,9 +11,10 @@ This repository contains a fully worked example of an RNA-seq differential expre
 
 RNA-seq Data from:
 
-```
-Meaker GA, Nicholls M, Chahrour C, Hsu I, Smith A, Bozhilov Y, Leung M, Vassort H, Olender L, Beaven O, Huang X, Brown EJ, Vanden Bempt M, Khoo HM, Bhadury J, Milne TA, Wilkinson AC. A genome-wide screen identifies Runx2 as a novel regulator of hematopoietic stem cell expansion and T-cell commitment. Blood. 2025 Dec 25;146(26):3188-3200. doi: 10.1182/blood.2025029115. PubMed PMID: 40961240.
-```
+
+Meaker GA, Nicholls M, Chahrour C, et al. A genome-wide screen identifies *Runx2* as a novel regulator of hematopoietic stem cell expansion and T-cell commitment. [*Blood*](https://doi.org/10.1182/blood.2025029115)
+
+
 ---
 
 ## 📁 Contents
