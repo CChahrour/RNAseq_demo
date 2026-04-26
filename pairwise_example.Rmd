@@ -1,5 +1,5 @@
 ---
-title: "RNA-seq - LRT example"
+title: "RNA-seq - pairwise Wald example"
 author: "Catherine Chahrour"
 date: "`r format(Sys.time(), '%d %B %Y')`"
 format:
@@ -45,13 +45,16 @@ suppressPackageStartupMessages(library(qvalue))
 suppressPackageStartupMessages(library(limma))
 
 # Set working directory (adjust as needed)
-# setwd(dir = "/path/to/working_directory")
+cwd <- getwd()
+setwd(dir = cwd)
 ```
 
 RNA-seq Data from:
 
 Meaker GA, Nicholls M, Chahrour C, Hsu I, Smith A, Bozhilov Y, Leung M, Vassort H, Olender L, Beaven O, Huang X, Brown EJ, Vanden Bempt M, Khoo HM, Bhadury J, Milne TA, Wilkinson AC. A genome-wide screen identifies Runx2 as a novel regulator of hematopoietic stem cell expansion and T-cell commitment. Blood. 2025 Dec 25;146(26):3188-3200. 
 doi: 10.1182/blood.2025029115. PubMed PMID: 40961240.
+
+This report uses the HPC raw count matrix from GSE288012 to demonstrate a focused two-group DESeq2 analysis. The workflow compares homerozygous *Runx2* samples (`hom`) with wild-type controls (`wt`), then walks through quality control, model fitting, and visual summaries of differential expression.
 
 ```{r}
 url <- "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE288012&format=file&file=GSE288012%5Fraw%5Fcounts%5FHPC%2Etsv%2Egz"
@@ -64,13 +67,15 @@ df <- read.delim(gzfile(dest), header = TRUE, skip = 1, check.names = FALSE)
 
 # Sample Information
 
+Sample metadata are reconstructed from the count matrix column names. The sample labels are split into the cell population, genotype, and replicate fields, and this pairwise example keeps only the `wt` and `hom` samples so that the Wald test has a single genotype contrast to estimate.
+
 ```{r}
 # Load sample metadata and convert character and numeric columns to factors
 sample_info <- data.frame(sample = colnames(df)) %>%
   filter(startsWith(sample, "seqnado_output")) %>% 
   mutate(sample = gsub("(.+aligned/)(.+)(.bam)", "\\2", sample)) %>% 
   separate(col = sample, into = c("cell", "genotype", "replicate"), remove = F) %>% 
-  filter(genotype != "hom") %>% # Here we only wnt the wt and het samples
+  filter(genotype != "het") %>% # Keep only wt and het samples for the pairwise comparison
   mutate(across(where(is.character), as.factor)) %>%
   mutate(across(where(is.numeric), as.factor)) 
 
@@ -106,6 +111,8 @@ col_ha <- HeatmapAnnotation(
 
 # Counts from SeqNado
 
+The raw count table is converted into the matrix format expected by DESeq2: genes in rows and samples in columns. Columns are renamed to match the cleaned sample metadata, only the selected samples are retained, and genes with zero counts across all selected samples are removed.
+
 ```{r}
 # Load and clean count matrix from featureCounts output
 counts <- df %>%
@@ -117,6 +124,8 @@ counts <- df %>%
 ```
 
 # DE analysis
+
+DESeq2 models count data using negative binomial generalized linear models. Here, the design tests for expression differences explained by genotype, with `wt` set as the reference level and `hom` compared against it using the Wald test.
 
 ```{r}
 # Create DESeq2 dataset using full model for genotype
@@ -133,6 +142,8 @@ dds <- DESeq(dds, test = "Wald")
 Normalisation was performed in DESeq2 and data vst transformed to allow for visualisation.
 
 ## RLE
+
+Relative log expression (RLE) plots provide a sample-level quality control check after variance-stabilizing transformation. Well-normalized samples should have broadly similar RLE distributions centered around zero; large shifts or unusually wide boxes can indicate sample-specific bias or outliers.
 
 ```{r}
 # Variance stabilizing transformation followed by batch correction
@@ -165,6 +176,8 @@ ggplot(rle_df, aes(x = sample, y = RLE, fill = genotype)) +
 
 ## Sample distance matrix
 
+The sample distance matrix compares samples using the variance-stabilized expression values. Samples with similar global expression profiles cluster together, which helps check whomher biological replicates group as expected and whomher any sample looks unusually different from the rest.
+
 ```{r}
 # Compute sample-to-sample Euclidean distance matrix
 sampleDists <- vst_counts %>% 
@@ -192,6 +205,8 @@ draw(HM_sampleDists, merge_legend = TRUE)
 ```
 
 ## Overview by PCA {.tabset}
+
+Principal component analysis (PCA) summarizes the main axes of variation across samples. In this plot, each point is a sample, colored by genotype and labeled by replicate, so genotype separation and replicate consistency can be assessed visually.
 
 ```{r}
 # Perform PCA and calculate percent variance per PC
@@ -225,6 +240,8 @@ ggplot(pca_data, aes(PC1, PC2, color = genotype)) +
 ```
 
 ## PCA correlate with covariates
+
+This heatmap checks which retained sample metadata variables are most strongly associated with the leading principal components. Strong correlations can help identify whomher genotype or replicate structure is driving the dominant variation in the dataset.
 
 ```{r}
 # Convert metadata to numeric factors for correlation with PCs
@@ -263,6 +280,8 @@ draw(heatmap, heatmap_legend_side = "bottom", annotation_legend_side = "right")
 
 # DE results
 
+This section extracts the DESeq2 result table for the `hom` vs `wt` contrast and joins it to mean normalized counts. The table is sorted by adjusted p-value so the strongest differential expression signals appear first.
+
 ```{r}
 normCounts <- counts(dds, normalized = T) %>%
   as.data.frame() %>%
@@ -287,6 +306,8 @@ results <- results(dds) %>%
 
 ## Histogram of p-values {.tabset}
 
+The p-value histogram is a broad diagnostic for the differential expression test. A mostly flat distribution with enrichment near zero is typical when most genes are not differentially expressed but a subset shows evidence of genotype-associated changes.
+
 ```{r}
 
 p_val <- ggplot(results, aes(pvalue)) +
@@ -304,56 +325,81 @@ print(p_val)
 #   plot = p_val, device = cairo_pdf, dpi = 1200, width = 6, height = 6)
 ```
 
-## Number of Diff_genes genes
+## Number of differentially expressed genes
+
+This summary counts genes passing several adjusted p-value thresholds, split into non-overlapping absolute log2 fold-change bins. Positive counts represent genes higher in `hom` relative to `wt`, while negative counts represent genes lower in `hom` relative to `wt`.
 
 ```{r}
-summary_fn <- function(df, pvals, fc_thresholds) {
+summary_fn <- function(df, pvals, fc_breaks, fc_labels) {
   summary_df <- data.frame()
-  
+
   for (pval in pvals) {
-    for (i in seq_along(fc_thresholds)) {
-      if (i == length(fc_thresholds)) {
-        count_pos <- sum(df$padj < pval & df$log2FoldChange >= fc_thresholds[i], na.rm = TRUE)
-        count_neg <- sum(df$padj < pval & df$log2FoldChange <= -fc_thresholds[i], na.rm = TRUE)
-      } else {
-        count_pos <- sum(df$padj < pval & df$log2FoldChange >= fc_thresholds[i] & df$log2FoldChange < fc_thresholds[i + 1], na.rm = TRUE)
-        count_neg <- sum(df$padj < pval & df$log2FoldChange <= -fc_thresholds[i] & df$log2FoldChange > -fc_thresholds[i + 1], na.rm = TRUE)
-      }
-      summary_df[1, paste0('fc_', fc_thresholds[i], '_pos_', pval)] <- count_pos
-      summary_df[1, paste0('fc_', fc_thresholds[i], '_neg_', pval)] <- -count_neg  
+    sig_df <- df %>%
+      filter(padj < pval, !is.na(log2FoldChange), log2FoldChange != 0)
+
+    for (i in seq_along(fc_breaks)) {
+      lower <- fc_breaks[i]
+      upper <- ifelse(i == length(fc_breaks), Inf, fc_breaks[i + 1])
+
+      count_pos <- sum(
+        sig_df$log2FoldChange > 0 &
+          abs(sig_df$log2FoldChange) >= lower &
+          abs(sig_df$log2FoldChange) < upper
+      )
+      count_neg <- sum(
+        sig_df$log2FoldChange < 0 &
+          abs(sig_df$log2FoldChange) >= lower &
+          abs(sig_df$log2FoldChange) < upper
+      )
+
+      summary_df <- bind_rows(
+        summary_df,
+        data.frame(
+          pvalue = paste0("padj < ", pval),
+          fc_bin = fc_labels[i],
+          direction = c("up", "down"),
+          count = c(count_pos, -count_neg)
+        )
+      )
     }
   }
-  
+
   summary_df %>%
-    pivot_longer(cols = starts_with("fc_"), values_to = "count") %>%
-    separate(col = name, into = c("fc", "fc_value", "direction", "pvalue"), sep = "_") %>%
-    mutate(fc_value = paste0("fc_", fc_value),
-           fc_value = factor(fc_value, levels = rev(unique(fc_value))),
-           pvalue = factor(pvalue, levels = unique(pvalue)))
+    mutate(
+      fc_bin = factor(fc_bin, levels = rev(fc_labels)),
+      pvalue = factor(pvalue, levels = paste0("padj < ", pvals))
+    )
 }
 
-# Define p-values and FC thresholds
+# Define adjusted p-value thresholds and non-overlapping log2FC bins
 pvalues <- c(0.05, 0.01, 0.001)
-fc_thresholds <- c(0:3)
+fc_breaks <- c(0, 1, 2, 3)
+fc_labels <- c("0-1", "1-2", "2-3", ">=3")
 
 # run our little function
-diff_summary <- summary_fn(results, pvalues, fc_thresholds)
+diff_summary <- summary_fn(results, pvalues, fc_breaks, fc_labels)
 
 # Just making the colours more contrasty
-fc_col <- brewer.pal(n = length(fc_thresholds) + 2, "Purples")[-c(1:2)] %>% 
-  set_names(paste0("fc_", fc_thresholds))
+fc_col <- brewer.pal(n = length(fc_labels) + 2, "Purples")[-c(1:2)] %>%
+  set_names(fc_labels)
 res_names <- resultsNames(dds)[-1]
 # Plot the summary
-ggplot(diff_summary, aes(x = pvalue, y = count, fill = fc_value)) +
+ggplot(diff_summary, aes(x = pvalue, y = count, fill = fc_bin)) +
   geom_bar(stat = "identity", position = "stack") +
   geom_hline(yintercept = 0, color = "darkgrey") +
-  ggtitle(paste("Diff_genes -", res_names)) +
+  ggtitle(paste("DE genes -", res_names)) +
   scale_fill_manual(values = fc_col) +
   theme_bw() +
-  labs(x = "P-value Threshold", y = "Count")
+  labs(
+    x = "Adjusted p-value threshold",
+    y = "Number of genes",
+    fill = "|log2FC| bin"
+  )
 ```
 
 # Volcano
+
+The volcano plot combines effect size and statistical significance for each gene. Genes farther from zero on the x-axis have larger log2 fold changes, while genes higher on the y-axis have smaller adjusted p-values; the most significant up- and down-regulated genes are labeled.
 
 ```{r}
 colors <- brewer.pal(5, "RdBu")[c(5,1)] %>%
@@ -412,7 +458,7 @@ print(g)
 
 # Heatmap
 
-padj < 0.05
+The heatmap shows the expression pattern of genes significant at `padj < 0.05`, using row-scaled normalized counts. This emphasizes relative expression differences across samples and helps show whomher significant genes separate the `hom` and `wt` groups.
 
 ```{r}
 results_sig <- results %>%
@@ -464,7 +510,8 @@ ht = draw(DEheatmap, heatmap_legend_side = "bottom", annotation_legend_side = "r
 
 # Session Info
 
+The session information records the R version and package versions used to render the report. This is useful for reproducibility, especially for Bioconductor workflows where package versions can affect results.
+
 ```{r results='markup'}
 sessionInfo()
 ```
-

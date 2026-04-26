@@ -45,13 +45,17 @@ suppressPackageStartupMessages(library(qvalue))
 suppressPackageStartupMessages(library(limma))
 
 # Set working directory (adjust as needed)
-# setwd(dir = "/path/to/working_directory")
+cwd <- getwd()
+setwd(dir = cwd)
 ```
 
 RNA-seq Data from:
 
 Meaker GA, Nicholls M, Chahrour C, Hsu I, Smith A, Bozhilov Y, Leung M, Vassort H, Olender L, Beaven O, Huang X, Brown EJ, Vanden Bempt M, Khoo HM, Bhadury J, Milne TA, Wilkinson AC. A genome-wide screen identifies Runx2 as a novel regulator of hematopoietic stem cell expansion and T-cell commitment. Blood. 2025 Dec 25;146(26):3188-3200. 
 doi: 10.1182/blood.2025029115. PubMed PMID: 40961240.
+
+This report uses the HPC raw count matrix from GSE288012 to demonstrate a DESeq2 likelihood ratio test (LRT). The LRT asks whether genotype explains expression variation overall across the `hom`, `het`, and `wt` groups, rather than testing only one pairwise contrast.
+
 
 ```{r}
 url <- "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE288012&format=file&file=GSE288012%5Fraw%5Fcounts%5FHPC%2Etsv%2Egz"
@@ -61,8 +65,9 @@ download.file(url, destfile = dest, mode = "wb")
 df <- read.delim(gzfile(dest), header = TRUE, skip = 1, check.names = FALSE)
 ```
 
-
 # Sample Information
+
+Sample metadata are reconstructed from the count matrix column names. The sample labels are split into the cell population, genotype, and replicate fields, and all three genotype groups are retained for the LRT.
 
 ```{r}
 # Load sample metadata and convert character and numeric columns to factors
@@ -105,6 +110,8 @@ col_ha <- HeatmapAnnotation(
 
 # Counts from SeqNado
 
+The raw count table is converted into the matrix format expected by DESeq2: genes in rows and samples in columns. Columns are renamed to match the cleaned sample metadata, all selected genotype samples are retained, and genes with zero counts across all samples are removed.
+
 ```{r}
 # Load and clean count matrix from featureCounts output
 counts <- df %>%
@@ -116,6 +123,8 @@ counts <- df %>%
 ```
 
 # DE analysis
+
+The full model includes genotype (`~ genotype`), while the reduced model contains only the intercept (`~ 1`). The LRT compares these models gene by gene, identifying genes for which adding genotype significantly improves model fit.
 
 ```{r}
 # Create DESeq2 dataset using full model for genotype
@@ -132,6 +141,8 @@ dds <- DESeq(dds, test="LRT", reduced = ~ 1)
 Normalisation was performed in DESeq2 and data vst transformed to allow for visualisation.
 
 ## RLE
+
+Relative log expression (RLE) plots provide a sample-level quality control check after variance-stabilizing transformation. Well-normalized samples should have broadly similar RLE distributions centered around zero; large shifts or unusually wide boxes can indicate sample-specific bias or outliers.
 
 ```{r}
 # Variance stabilizing transformation followed by batch correction
@@ -164,6 +175,8 @@ ggplot(rle_df, aes(x = sample, y = RLE, fill = genotype)) +
 
 ## Sample distance matrix
 
+The sample distance matrix compares samples using the variance-stabilized expression values. Samples with similar global expression profiles cluster together, which helps check whether biological replicates and genotype groups behave as expected.
+
 ```{r}
 # Compute sample-to-sample Euclidean distance matrix
 sampleDists <- vst_counts %>% 
@@ -191,6 +204,8 @@ draw(HM_sampleDists, merge_legend = TRUE)
 ```
 
 ## Overview by PCA {.tabset}
+
+Principal component analysis (PCA) summarizes the main axes of variation across samples. In this plot, each point is a sample, colored by genotype and labeled by replicate, so genotype separation and replicate consistency can be assessed visually.
 
 ```{r}
 # Perform PCA and calculate percent variance per PC
@@ -224,6 +239,8 @@ ggplot(pca_data, aes(PC1, PC2, color = genotype)) +
 ```
 
 ## PCA correlate with covariates
+
+This heatmap checks which retained sample metadata variables are most strongly associated with the leading principal components. Strong correlations can help identify whether genotype or replicate structure is driving the dominant variation in the dataset.
 
 ```{r}
 # Convert metadata to numeric factors for correlation with PCs
@@ -259,38 +276,132 @@ heatmap <- Heatmap(
 draw(heatmap, heatmap_legend_side = "bottom", annotation_legend_side = "right")
 ```
 
+# Heatmap
+
+padj < 0.05
+
+The LRT result table is used to identify genes with a significant overall genotype effect. The heatmap then shows the expression pattern of genes significant at `padj < 0.05`, using row-scaled normalized counts so that relative expression differences across the `hom`, `het`, and `wt` groups are easier to compare.
+
+```{r}
+normCounts <- counts(dds, normalized = T) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene")
+
+mean_normCounts <- normCounts %>%
+  as.data.frame() %>%
+  gather(sample, value, -gene) %>%
+  left_join(sample_info, by = c(sample = "sample")) %>%
+  group_by(gene, cell) %>%
+  summarise(mean_value = mean(value), .groups = "rowwise") %>%
+  spread(key = cell, value = mean_value, sep = "_mean_")
+
+results <- results(dds) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  inner_join(mean_normCounts, by = "gene") %>%
+  filter(!is.na(padj)) %>%
+  filter(!is.na(pvalue)) %>%
+  arrange(padj)
+```
+
+
+```{r}
+results_sig <- results %>%
+  filter(padj < 0.05) %>%
+  arrange(padj) %>%
+  head(5000)
+
+matrix <- normCounts %>%
+  as.data.frame() %>%
+  filter(gene %in% results_sig$gene) %>%
+  column_to_rownames("gene") %>%
+  as.matrix() %>%
+  t() %>%
+  scale() %>%
+  t()
+
+groups <- as.character(sample_info$genotype)
+col_fun <- colorRamp2(seq(1.5, -1.5, length = 11), brewer.pal(n = 11, name = "RdBu"))
+
+set.seed(123)
+DEheatmap <- Heatmap(
+  matrix,
+  top_annotation = col_ha,
+  cluster_rows = T,
+  show_row_names = F,
+  row_title = "genes",
+  show_row_dend = T,
+  show_column_names = FALSE,
+  cluster_columns = F,
+  column_split = groups,
+  # row_km = 3,
+  col = col_fun,
+  use_raster = T,
+  row_title_gp = gpar(fontsize = 16),
+  column_title_gp = gpar(fontsize = 16, fontface = "bold"),
+  heatmap_legend_param = list(
+    title = "Row z-score",
+    title_gp = gpar(fontsize = 16),
+    labels_gp = gpar(fontsize = 16),
+    title_position = "topcenter",
+    direction = "horizontal"))
+
+ht = draw(DEheatmap, heatmap_legend_side = "bottom", annotation_legend_side = "right")
+
+# pdf(file=paste0(fig_dir, "/heatmap.pdf"), width=8, height=6, pointsize = 16)
+# draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "bottom")
+# dev.off()
+
+```
+
+# Number of significant genes
+
+Because the LRT tests the genotype term as a whole, this summary counts significant genes using adjusted p-value thresholds only. It does not apply log2 fold-change cutoffs or assign genes to up/down categories, since a multi-level LRT does not have a single direction of effect.
+
+```{r}
+results <- results(dds) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  filter(!is.na(padj)) %>%
+  filter(!is.na(pvalue)) %>%
+  arrange(padj)
+
+padj_thresholds <- c(0.05, 0.01, 0.001)
+
+DEsummary <- data.frame(
+  padj_threshold = factor(
+    paste0("padj < ", padj_thresholds),
+    levels = paste0("padj < ", padj_thresholds)
+  ),
+  count = sapply(
+    padj_thresholds,
+    function(padj_cutoff) sum(results$padj < padj_cutoff, na.rm = TRUE)
+  )
+)
+
+ggplot(DEsummary, aes(x = padj_threshold, y = count)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = count), vjust = -0.3, size = 5) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  ggtitle("Significant genes from LRT") +
+  labs(
+    x = "Adjusted p-value threshold",
+    y = "Number of significant genes"
+  ) +
+  theme_light() +
+  theme(text = element_text(size = 15))
+```
+
 
 # Pairwise comparisons {.tabset}
+
+The overall LRT identifies genes with evidence of genotype-associated expression changes. These follow-up coefficient plots provide exploratory pairwise views of the fitted genotype effects, helping show which genotype comparisons may contribute to the overall signal.
 
 ```{r}
 colors <- brewer.pal(5, "RdBu")[c(5,1)] %>% 
   append("grey") %>% 
   set_names(c("Down", "Up", "NotSig"))
 
-DE_summary_fn <- function(df, fcs, pvals) {
-  summary_df <- data.frame()
-  for (fc in fcs) {
-    for (pval in pvals) {
-      up_count = sum(df$padj < pval & df$log2FoldChange >  fc)
-      down_count = sum(df$padj < pval & df$log2FoldChange < -fc)
-
-      summary_df[1, paste0('log2FC>', fc, '_', pval)] <- up_count
-      summary_df[1, paste0('log2FC<', fc, '_', pval)] <- down_count
-    }
-  }
-
-  summary_df %>%
-    pivot_longer(cols = starts_with("log"), values_to = "count") %>%
-    separate(col = name, into = c("log2FoldChange", "pvalue"), sep = "_") %>%
-    mutate(
-      FC_direction = ifelse(str_detect(log2FoldChange, ">"), "up", "down"), 
-      FoldChange_threshold = str_extract(log2FoldChange, "(?<=<|>)(\\d+)"), 
-      count = ifelse(str_detect(log2FoldChange, ">"), count, -count)
-    )
-}
-
-fold_changes <- c(0:3)
-pvalues <- c(0.05, 0.01, 0.001)
 res_names <- resultsNames(dds)[-1]
 
 DE_results_pairwise <- list()
@@ -317,18 +428,6 @@ for(comp in res_names) {
   res_list <- list(res_filtered)
   names(res_list) <- comp
   DE_results_pairwise <- append(DE_results_pairwise, res_list)
-  DEsummary <- DE_summary_fn(res, fold_changes, pvalues)
-
-  p <- ggplot(DEsummary, aes(x=pvalue, y=count, 
-                        fill=FoldChange_threshold,
-                        group=FoldChange_threshold)) +
-    geom_bar(stat="identity", position=position_dodge()) +
-    geom_hline(yintercept=0, color = "grey") +
-    ggtitle(paste("DE genes:", comp)) +
-    scale_fill_brewer(palette = "Dark2") +
-    theme_light() +
-    theme(text = element_text(size = 15))
-  print(p)
 
   res4plot <- res %>%
     dplyr::select(gene, log2FoldChange, padj) %>%
@@ -372,6 +471,8 @@ for(comp in res_names) {
 
 # Overlapping genes in comparisons
 
+This Venn diagram compares the significant gene sets from the follow-up genotype coefficients. It helps show whether the `hom` and `het` comparisons highlight largely shared or distinct subsets of genes relative to `wt`.
+
 ```{r}
 library(venn)
 venn::venn(
@@ -390,7 +491,8 @@ venn::venn(
 
 # Session Info
 
+The session information records the R version and package versions used to render the report. This is useful for reproducibility, especially for Bioconductor workflows where package versions can affect results.
+
 ```{r results='markup'}
 sessionInfo()
 ```
-
